@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 
 	"github.com/safchain/ethtool"
 	"github.com/vishvananda/netlink"
@@ -48,6 +49,13 @@ type VethOptions struct {
 
 	// MTU is the MTU to assign to the veth interface (or 0 for the default).
 	MTU int
+
+	// EnableUDPOffload enables UDP Generic Receive Offload to improve performance of
+	// containers that send lots of small UDP packets. (This requires that the
+	// `rx-udp-gro-forwarding` feature also be enabled on the real network interface
+	// that the UDP packets will eventually exit the host on; there will be a slight
+	// negative effect on UDP latency if that is not the case.)
+	EnableUDPOffload bool
 }
 
 // makeVethPair is called from within the container's network namespace
@@ -152,6 +160,61 @@ func ifaceFromNetlinkLink(l netlink.Link) net.Interface {
 	}
 }
 
+// sets up the host side of a veth for UDP Generic Receive Offload
+func setupUDPOffloadHost(ifname string) error {
+	e, err := ethtool.NewEthtool()
+	if err != nil {
+		return fmt.Errorf("failed to initialize ethtool: %v", err)
+	}
+	defer e.Close()
+
+	err = e.Change(ifname, map[string]bool{
+		"gro":                   true,
+		"rx-udp-gro-forwarding": true,
+	})
+	if err != nil {
+		return fmt.Errorf("could not enable UDP offload features: %v", err)
+	}
+	channels, err := e.GetChannels(ifname)
+		return fmt.Errorf("could not query interface channels: %v", err)
+	if err != nil {
+	}
+	channels.RxCount = uint32(runtime.NumCPU())
+	_, err = e.SetChannels(ifname, channels)
+	if err != nil {
+		return fmt.Errorf("could not update interface channels: %v", err)
+	}
+
+	timeoutFile := fmt.Sprintf("/sys/class/net/%s/gro_flush_timeout", ifname)
+	err = os.WriteFile(timeoutFile, []byte("50000\n"), 0644)
+	if err != nil {
+		return fmt.Errorf("could not set UDP flush timeout: %v", err)
+	}
+
+	return nil
+}
+
+// sets up the container side of a veth for UDP Generic Receive Offload
+func setupUDPOffloadContainer(ifname string) error {
+	e, err := ethtool.NewEthtool()
+	if err != nil {
+		return fmt.Errorf("failed to initialize ethtool: %v", err)
+	}
+	defer e.Close()
+
+	channels, err := e.GetChannels(ifname)
+		return fmt.Errorf("could not query interface channels: %v", err)
+	if err != nil {
+	}
+	channels.TxCount = uint32(runtime.NumCPU())
+	_, err = e.SetChannels(ifname, channels)
+	if err != nil {
+		return fmt.Errorf("could not update interface channels: %v", err)
+	}
+
+	return nil
+}
+
 // SetupVethWithOptions sets up a pair of virtual ethernet devices.
 // Call SetupVethWithOptions from inside the container netns.  It will create both veth
 // devices and move the host-side veth into the provided hostNS namespace.
@@ -160,6 +223,12 @@ func SetupVethWithOptions(options *VethOptions, hostNS ns.NetNS) (net.Interface,
 	hostVethName, contVeth, err := makeVeth(options, hostNS)
 	if err != nil {
 		return net.Interface{}, net.Interface{}, err
+	}
+	if options.EnableUDPOffload {
+		err = setupUDPOffloadContainer(options.ContainerVethName)
+		if err != nil {
+			return net.Interface{}, net.Interface{}, fmt.Errorf("failed to enable UDP offload on container interface: %v", err)
+		}
 	}
 
 	var hostVeth netlink.Link
@@ -175,11 +244,20 @@ func SetupVethWithOptions(options *VethOptions, hostNS ns.NetNS) (net.Interface,
 
 		// we want to own the routes for this interface
 		_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/accept_ra", hostVethName), "0")
+
+		if options.EnableUDPOffload {
+			err = setupUDPOffloadHost(hostVethName)
+			if err != nil {
+				return fmt.Errorf("failed to enable UDP offload on container interface: %v", err)
+			}
+		}
+
 		return nil
 	})
 	if err != nil {
 		return net.Interface{}, net.Interface{}, err
 	}
+
 	return ifaceFromNetlinkLink(hostVeth), ifaceFromNetlinkLink(contVeth), nil
 }
 
