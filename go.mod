@@ -20,7 +20,7 @@ require (
 	github.com/mattn/go-shellwords v1.0.3
 	github.com/onsi/ginkgo v0.0.0-20151202141238-7f8ab55aaf3b
 	github.com/onsi/gomega v0.0.0-20151007035656-2152b45fa28a
-	github.com/safchain/ethtool v0.0.0-20190326074333-42ed695e3de8
+	github.com/safchain/ethtool v0.0.0-20210803160452-9aa261dae9b1
 	github.com/sirupsen/logrus v1.0.6 // indirect
 	github.com/stretchr/testify v1.3.0 // indirect
 	github.com/vishvananda/netlink v0.0.0-20181108222139-023a6dafdcdf
