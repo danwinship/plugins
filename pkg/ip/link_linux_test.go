@@ -233,6 +233,39 @@ var _ = Describe("Link", func() {
 			})
 		})
 
+		It("successfully creates a veth pair with an explicit host veth name", func() {
+			// To avoid accidentally conflicting with a real interface, we
+			// use RandomVethName anyway...
+			hostVethName, err := RandomVethName()
+			Expect(err).NotTo(HaveOccurred())
+			hostVethName += "test"
+
+			_ = containerNetNS.Do(func(ns.NetNS) error {
+				defer GinkgoRecover()
+
+				hostVeth, _, err := ip.SetupVethWithOptions(
+					&VethOptions{
+						ContainerVethName: containerVethName,
+						HostVethName:      hostVethName,
+						MTU:               mtu,
+					},
+					hostNetNS,
+				)
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err := netlink.LinkByName(containerVethName)
+				Expect(err).NotTo(HaveOccurred())
+				return nil
+			})
+
+			_ = hostNetNS.Do(func(ns.NetNS) error {
+				defer GinkgoRecover()
+
+				_, err := netlink.LinkByName(hostVethName)
+				Expect(err).NotTo(HaveOccurred())
+				return nil
+			})
+		})
 	})
 
 	It("DelLinkByName must delete the veth endpoints", func() {
