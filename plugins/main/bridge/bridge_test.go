@@ -23,7 +23,6 @@ import (
 	"strings"
 
 	"github.com/coreos/go-iptables/iptables"
-	"github.com/networkplumbing/go-nft/nft"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/vishvananda/netlink"
@@ -2613,48 +2612,25 @@ var _ = Describe("bridge Operations", func() {
 })
 
 func assertMacSpoofCheckRulesExist() {
-	assertMacSpoofCheckRules(
-		func(actual interface{}, expectedLen int) {
-			ExpectWithOffset(3, actual).To(HaveLen(expectedLen))
-		})
+	nft, err := knftables.New(knftables.BridgeFamily, "cni_spoofcheck")
+	ExpectWithOffset(2, err).NotTo(HaveOccurred())
+
+	rules, err := nft.ListRules(context.TODO(), "cni-br-iface-dummy-0-eth0")
+	ExpectWithOffset(2, err).NotTo(HaveOccurred())
+	ExpectWithOffset(2, rules).To(HaveLen(1))
+
+	rules, err = nft.ListRules(context.TODO(), "cni-br-iface-dummy-0-eth0-mac")
+	ExpectWithOffset(2, err).NotTo(HaveOccurred())
+	ExpectWithOffset(2, rules).To(HaveLen(2))
 }
 
 func assertMacSpoofCheckRulesMissing() {
-	assertMacSpoofCheckRules(
-		func(actual interface{}, _ int) {
-			ExpectWithOffset(3, actual).To(BeEmpty())
-		})
-}
-
-func assertMacSpoofCheckRules(assert func(actual interface{}, expectedLen int)) {
-	c, err := nft.ReadConfig()
+	nft, err := knftables.New(knftables.BridgeFamily, "cni_spoofcheck")
 	ExpectWithOffset(2, err).NotTo(HaveOccurred())
 
-	expectedTable := nft.NewTable("nat", "bridge")
-	filter := nft.TypeFilter
-	hook := nft.HookPreRouting
-	prio := -300
-	policy := nft.PolicyAccept
-	expectedBaseChain := nft.NewChain(expectedTable, "PREROUTING", &filter, &hook, &prio, &policy)
+	_, err = nft.ListRules(context.TODO(), "cni-br-iface-dummy-0-eth0")
+	ExpectWithOffset(2, knftables.IsNotFound(err)).To(BeTrue(), "expected %v to be 'not found' error", err)
 
-	assert(c.LookupRule(nft.NewRule(
-		expectedTable,
-		expectedBaseChain,
-		nil, nil, nil,
-		"macspoofchk-dummy-0-eth0",
-	)), 1)
-
-	assert(c.LookupRule(nft.NewRule(
-		expectedTable,
-		nft.NewRegularChain(expectedTable, "cni-br-iface-dummy-0-eth0"),
-		nil, nil, nil,
-		"macspoofchk-dummy-0-eth0",
-	)), 1)
-
-	assert(c.LookupRule(nft.NewRule(
-		expectedTable,
-		nft.NewRegularChain(expectedTable, "cni-br-iface-dummy-0-eth0-mac"),
-		nil, nil, nil,
-		"macspoofchk-dummy-0-eth0",
-	)), 2)
+	_, err = nft.ListRules(context.TODO(), "cni-br-iface-dummy-0-eth0-mac")
+	ExpectWithOffset(2, knftables.IsNotFound(err)).To(BeTrue(), "expected %v to be 'not found' error", err)
 }

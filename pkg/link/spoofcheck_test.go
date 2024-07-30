@@ -12,16 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package link_test
+package link
 
 import (
-	"fmt"
+	"slices"
 
-	"github.com/networkplumbing/go-nft/nft"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"github.com/containernetworking/plugins/pkg/link"
+	"sigs.k8s.io/knftables"
 )
 
 var _ = Describe("spoofcheck", func() {
@@ -31,292 +29,90 @@ var _ = Describe("spoofcheck", func() {
 
 	Context("setup", func() {
 		It("succeeds", func() {
-			c := configurerStub{}
-			sc := link.NewSpoofCheckerWithConfigurer(iface, mac, id, &c)
+			fake := knftables.NewFake(knftables.BridgeFamily, spoofCheckTableName)
+			sc := newSpoofCheckerWithNFT(iface, mac, id, fake)
 			Expect(sc.Setup()).To(Succeed())
 
-			assertExpectedTableAndChainsInSetupConfig(c)
-			assertExpectedRulesInSetupConfig(c)
+			assertExpectedChainsExist(fake,
+				"prerouting",
+				"cni-br-iface-container99-net1",
+				"cni-br-iface-container99-net1-mac",
+			)
+			assertExpectedRulesExist(fake)
 		})
 
-		It("fails to setup config when 1st apply is unsuccessful (declare table and chains)", func() {
-			c := &configurerStub{failFirstApplyConfig: true}
-			sc := link.NewSpoofCheckerWithConfigurer(iface, mac, id, c)
-			Expect(sc.Setup()).To(MatchError("failed to setup spoof-check: " + errorFirstApplyText))
-		})
-
-		It("fails to setup config when 2nd apply is unsuccessful (flush and add the rules)", func() {
-			c := &configurerStub{failSecondApplyConfig: true}
-			sc := link.NewSpoofCheckerWithConfigurer(iface, mac, id, c)
-			Expect(sc.Setup()).To(MatchError("failed to setup spoof-check: " + errorSecondApplyText))
+		It("fails when nft is unavailable", func() {
+			sc := newSpoofCheckerWithNFT(iface, mac, id, nil)
+			Expect(sc.Setup()).Error().To(HaveOccurred())
 		})
 	})
 
 	Context("teardown", func() {
 		It("succeeds", func() {
-			existingConfig := nft.NewConfig()
-			existingConfig.FromJSON([]byte(rowConfigWithRulesOnly()))
-			c := configurerStub{readConfig: existingConfig}
+			fake := knftables.NewFake(knftables.BridgeFamily, spoofCheckTableName)
+			err := fake.ParseDump(nftRules)
+			Expect(err).NotTo(HaveOccurred())
 
-			sc := link.NewSpoofCheckerWithConfigurer("", "", id, &c)
+			sc := newSpoofCheckerWithNFT("", "", id, fake)
 			Expect(sc.Teardown()).To(Succeed())
 
-			assertExpectedBaseChainRuleDeletionInTeardownConfig(c)
-			assertExpectedRegularChainsDeletionInTeardownConfig(c)
+			assertExpectedChainsExist(fake,
+				"prerouting",
+			)
 		})
 
-		It("fails, 1st apply is unsuccessful (delete iface match rule)", func() {
-			config := nft.NewConfig()
-			config.FromJSON([]byte(rowConfigWithRulesOnly()))
-			c := &configurerStub{applyConfig: []*nft.Config{config}, readConfig: config, failFirstApplyConfig: true}
-			sc := link.NewSpoofCheckerWithConfigurer("", "", id, c)
-			Expect(sc.Teardown()).To(MatchError(fmt.Sprintf(
-				"failed to teardown spoof-check: failed to delete iface match rule: %s, <nil>", errorFirstApplyText,
-			)))
-		})
-
-		It("fails, read current config is unsuccessful", func() {
-			config := nft.NewConfig()
-			config.FromJSON([]byte(rowConfigWithRulesOnly()))
-			c := &configurerStub{applyConfig: []*nft.Config{config}, readConfig: config, failReadConfig: true}
-			sc := link.NewSpoofCheckerWithConfigurer("", "", id, c)
-			Expect(sc.Teardown()).To(MatchError(fmt.Sprintf(
-				"failed to teardown spoof-check: %s, <nil>", errorReadText,
-			)))
-		})
-
-		It("fails, 2nd apply is unsuccessful (delete the regular chains)", func() {
-			config := nft.NewConfig()
-			config.FromJSON([]byte(rowConfigWithRulesOnly()))
-			c := &configurerStub{applyConfig: []*nft.Config{config}, readConfig: config, failSecondApplyConfig: true}
-			sc := link.NewSpoofCheckerWithConfigurer("", "", id, c)
-			Expect(sc.Teardown()).To(MatchError(fmt.Sprintf(
-				"failed to teardown spoof-check: <nil>, failed to delete regular chains: %s", errorSecondApplyText,
-			)))
-		})
-
-		It("fails, both applies are unsuccessful", func() {
-			config := nft.NewConfig()
-			config.FromJSON([]byte(rowConfigWithRulesOnly()))
-			c := &configurerStub{
-				applyConfig:           []*nft.Config{config},
-				readConfig:            config,
-				failFirstApplyConfig:  true,
-				failSecondApplyConfig: true,
-			}
-			sc := link.NewSpoofCheckerWithConfigurer("", "", id, c)
-			Expect(sc.Teardown()).To(MatchError(fmt.Sprintf(
-				"failed to teardown spoof-check: "+
-					"failed to delete iface match rule: %s, "+
-					"failed to delete regular chains: %s",
-				errorFirstApplyText, errorSecondApplyText,
-			)))
+		It("fails when nft is unavailable", func() {
+			sc := newSpoofCheckerWithNFT(iface, mac, id, nil)
+			Expect(sc.Teardown()).Error().To(HaveOccurred())
 		})
 	})
 
-	Context("echo", func() {
-		It("succeeds, no read called", func() {
-			c := configurerStub{}
-			sc := link.NewSpoofCheckerWithConfigurer(iface, mac, id, &c)
+	Context("setup and teardown", func() {
+		It("succeeds", func() {
+			fake := knftables.NewFake(knftables.BridgeFamily, spoofCheckTableName)
+			sc := newSpoofCheckerWithNFT(iface, mac, id, fake)
 			Expect(sc.Setup()).To(Succeed())
 			Expect(sc.Teardown()).To(Succeed())
-			Expect(c.readCalled).To(BeFalse())
-		})
 
-		It("succeeds, fall back to config read", func() {
-			c := configurerStub{applyReturnNil: true}
-			sc := link.NewSpoofCheckerWithConfigurer(iface, mac, id, &c)
-			Expect(sc.Setup()).To(Succeed())
-			c.readConfig = c.applyConfig[0]
-			Expect(sc.Teardown()).To(Succeed())
-			Expect(c.readCalled).To(BeTrue())
+			assertExpectedChainsExist(fake,
+				"prerouting",
+			)
 		})
 	})
 })
 
-func assertExpectedRegularChainsDeletionInTeardownConfig(action configurerStub) {
-	deleteRegularChainRulesJSONConfig, err := action.applyConfig[1].ToJSON()
-	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+var nftRules = `
+add table bridge cni_spoofcheck {}
+add chain bridge cni_spoofcheck prerouting { type filter hook prerouting priority -300 ; }
+add chain bridge cni_spoofcheck cni-br-iface-container99-net1
+add chain bridge cni_spoofcheck cni-br-iface-container99-net1-mac
+add rule bridge cni_spoofcheck prerouting iifname == net0 jump cni-br-iface-container99-net1 comment "macspoofchk-container99-net1"
+add rule bridge cni_spoofcheck cni-br-iface-container99-net1 jump cni-br-iface-container99-net1-mac comment "macspoofchk-container99-net1"
+add rule bridge cni_spoofcheck cni-br-iface-container99-net1-mac ether saddr == 02:00:00:00:12:34 return comment "macspoofchk-container99-net1"
+add rule bridge cni_spoofcheck cni-br-iface-container99-net1-mac drop comment "macspoofchk-container99-net1"
+`
 
-	expectedDeleteRegularChainRulesJSONConfig := `
-			{"nftables": [
-				{"delete": {"chain": {
-					"family": "bridge",
-					"table": "nat",
-					"name": "cni-br-iface-container99-net1"
-				}}},
-				{"delete": {"chain": {
-					"family": "bridge",
-					"table": "nat",
-					"name": "cni-br-iface-container99-net1-mac"
-				}}}
-			]}`
-
-	ExpectWithOffset(1, string(deleteRegularChainRulesJSONConfig)).To(MatchJSON(expectedDeleteRegularChainRulesJSONConfig))
-}
-
-func assertExpectedBaseChainRuleDeletionInTeardownConfig(action configurerStub) {
-	deleteBaseChainRuleJSONConfig, err := action.applyConfig[0].ToJSON()
-	Expect(err).NotTo(HaveOccurred())
-
-	expectedDeleteIfaceMatchRuleJSONConfig := `
-            {"nftables": [
-				{"delete": {"rule": {
-					"family": "bridge",
-					"table": "nat",
-					"chain": "PREROUTING",
-					"expr": [
-						{"match": {
-							"op": "==",
-							"left": {"meta": {"key": "iifname"}},
-							"right": "net0"
-						}},
-						{"jump": {"target": "cni-br-iface-container99-net1"}}
-					],
-					"comment": "macspoofchk-container99-net1"
-				}}}
-			]}`
-	Expect(string(deleteBaseChainRuleJSONConfig)).To(MatchJSON(expectedDeleteIfaceMatchRuleJSONConfig))
-}
-
-func rowConfigWithRulesOnly() string {
-	return `
-            {"nftables":[
-                {"rule":{"family":"bridge","table":"nat","chain":"PREROUTING",
-                    "expr":[
-                        {"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"net0"}},
-                        {"jump":{"target":"cni-br-iface-container99-net1"}}
-                    ],
-                    "comment":"macspoofchk-container99-net1"}},
-                {"rule":{"family":"bridge","table":"nat","chain":"cni-br-iface-container99-net1",
-                    "expr":[
-                        {"jump":{"target":"cni-br-iface-container99-net1-mac"}}
-                    ],
-                    "comment":"macspoofchk-container99-net1"}},
-                {"rule":{"family":"bridge","table":"nat","chain":"cni-br-iface-container99-net1-mac",
-                    "expr":[
-                        {"match":{
-                            "op":"==",
-                            "left":{"payload":{"protocol":"ether","field":"saddr"}},
-                            "right":"02:00:00:00:12:34"
-                        }},
-                        {"return":null}
-                    ],
-                    "comment":"macspoofchk-container99-net1"}},
-                {"rule":{"family":"bridge","table":"nat","chain":"cni-br-iface-container99-net1-mac",
-                    "expr":[{"drop":null}],
-                    "index":0,
-                    "comment":"macspoofchk-container99-net1"}}
-            ]}`
-}
-
-func assertExpectedTableAndChainsInSetupConfig(c configurerStub) {
-	config := c.applyConfig[0]
-	jsonConfig, err := config.ToJSON()
-	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-
-	expectedConfig := `
-        {"nftables": [
-            {"table": {"family": "bridge", "name": "nat"}},
-            {"chain": {
-                "family": "bridge",
-                "table": "nat",
-                "name": "PREROUTING",
-                "type": "filter",
-                "hook": "prerouting",
-                "prio": -300,
-                "policy": "accept"
-            }},
-            {"chain": {
-                "family": "bridge",
-                "table": "nat",
-                "name": "cni-br-iface-container99-net1"
-            }},
-            {"chain": {
-                "family": "bridge",
-                "table": "nat",
-                "name": "cni-br-iface-container99-net1-mac"
-            }}
-        ]}`
-	ExpectWithOffset(1, string(jsonConfig)).To(MatchJSON(expectedConfig))
-}
-
-func assertExpectedRulesInSetupConfig(c configurerStub) {
-	config := c.applyConfig[1]
-	jsonConfig, err := config.ToJSON()
-	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-
-	expectedConfig := `
-            {"nftables":[
-                {"flush":{"chain":{"family":"bridge","table":"nat","name":"cni-br-iface-container99-net1"}}},
-                {"flush":{"chain":{"family":"bridge","table":"nat","name":"cni-br-iface-container99-net1-mac"}}},
-                {"rule":{"family":"bridge","table":"nat","chain":"PREROUTING",
-                    "expr":[
-                        {"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"net0"}},
-                        {"jump":{"target":"cni-br-iface-container99-net1"}}
-                    ],
-                    "comment":"macspoofchk-container99-net1"}},
-                {"rule":{"family":"bridge","table":"nat","chain":"cni-br-iface-container99-net1",
-                    "expr":[
-                        {"jump":{"target":"cni-br-iface-container99-net1-mac"}}
-                    ],
-                    "comment":"macspoofchk-container99-net1"}},
-                {"rule":{"family":"bridge","table":"nat","chain":"cni-br-iface-container99-net1-mac",
-                    "expr":[
-                        {"match":{
-                            "op":"==",
-                            "left":{"payload":{"protocol":"ether","field":"saddr"}},
-                            "right":"02:00:00:00:12:34"
-                        }},
-                        {"return":null}
-                    ],
-                    "comment":"macspoofchk-container99-net1"}},
-                {"rule":{"family":"bridge","table":"nat","chain":"cni-br-iface-container99-net1-mac",
-                    "expr":[{"drop":null}],
-                    "comment":"macspoofchk-container99-net1"}}
-            ]}`
-	ExpectWithOffset(1, string(jsonConfig)).To(MatchJSON(expectedConfig))
-}
-
-const (
-	errorFirstApplyText  = "1st apply failed"
-	errorSecondApplyText = "2nd apply failed"
-	errorReadText        = "read failed"
-)
-
-type configurerStub struct {
-	applyConfig []*nft.Config
-	readConfig  *nft.Config
-
-	applyCounter int
-
-	failFirstApplyConfig  bool
-	failSecondApplyConfig bool
-	failReadConfig        bool
-
-	applyReturnNil bool
-	readCalled     bool
-}
-
-func (a *configurerStub) Apply(c *nft.Config) (*nft.Config, error) {
-	a.applyCounter++
-	if a.failFirstApplyConfig && a.applyCounter == 1 {
-		return nil, fmt.Errorf(errorFirstApplyText)
+func assertExpectedChainsExist(fake *knftables.Fake, chains ...string) {
+	for _, ch := range chains {
+		chain := fake.Table.Chains[ch]
+		Expect(chain).NotTo(BeNil(), "expected chain %q to exist", ch)
 	}
-	if a.failSecondApplyConfig && a.applyCounter == 2 {
-		return nil, fmt.Errorf(errorSecondApplyText)
+
+	for ch := range fake.Table.Chains {
+		found := slices.Contains(chains, ch)
+		Expect(found).To(BeTrue(), "did not expect chain %q to exist", ch)
 	}
-	a.applyConfig = append(a.applyConfig, c)
-	if a.applyReturnNil {
-		return nil, nil
-	}
-	return c, nil
 }
 
-func (a *configurerStub) Read(_ ...string) (*nft.Config, error) {
-	a.readCalled = true
-	if a.failReadConfig {
-		return nil, fmt.Errorf(errorReadText)
-	}
-	return a.readConfig, nil
+func assertExpectedRulesExist(fake *knftables.Fake) {
+	chain := fake.Table.Chains["cni-br-iface-container99-net1"]
+	Expect(chain).NotTo(BeNil(), "expected chain %q to exist", "cni-br-iface-container99-net1")
+	Expect(chain.Rules).To(HaveLen(1))
+	Expect(chain.Rules[0].Rule).To(Equal("jump cni-br-iface-container99-net1-mac"))
+
+	chain = fake.Table.Chains["cni-br-iface-container99-net1-mac"]
+	Expect(chain).NotTo(BeNil(), "expected chain %q to exist", "cni-br-iface-container99-net1-mac")
+	Expect(chain.Rules).To(HaveLen(2))
+	Expect(chain.Rules[0].Rule).To(Equal("ether saddr == 02:00:00:00:12:34 return"))
+	Expect(chain.Rules[1].Rule).To(Equal("drop"))
 }
